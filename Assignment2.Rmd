@@ -1,0 +1,522 @@
+---
+title: "STATS369 Assignment2"
+author: "DuYe"
+date: "4/29/2020"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+## Setup for R
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(leaps)
+library(car)
+library(glmnet)
+# set locale
+Sys.setlocale(category="LC_ALL",locale="en_US.UTF-8")
+```
+
+## Load the data of week2
+```{r}
+taxi_raw <- read_csv("./AS2_datasets/week2.csv")
+```
+
+## Remove columns that are clearly uninformative 
+
+The goal is to explore the relevant factors of tip_amount, **VendorID** and **store_and_fwd_flag** seem no help, **mta_tax**, **improvement_surcharge** are constant value, **total_amount** is the linear sum of other variables which have no help at all. These variables are removed at first.
+```{r}
+# 1 remove columns that are clearly uninformative 
+taxi = subset(taxi_raw, select=-c(VendorID, store_and_fwd_flag, mta_tax, improvement_surcharge,total_amount))
+```
+
+## Check values by summary and Filter rows with illegal values
+```{r}
+summary(taxi)
+# Filter rows with illegal values
+taxi = taxi %>% filter(passenger_count != 0 &
+                                           trip_distance != 0 &
+                                           pickup_longitude != 0 &
+                                           pickup_latitude != 0 &
+                                           RatecodeID < 7 &
+                                           dropoff_longitude != 0 &
+                                           dropoff_latitude !=0 &
+                                           payment_type == 1 &
+                                           fare_amount > 0 &
+                                           (extra == 0 |
+                                           extra == 0.5 |
+                                           extra == 1) &
+                                           tip_amount >= 0 &
+                                           tolls_amount >= 0)
+
+taxi$extra = factor(taxi$extra)
+taxi$RatecodeID = factor(taxi$RatecodeID)
+
+# Only the paymenttype = 1(Credit Card) counts the tip
+# Only the paymenttype = 1 counts the tip
+taxi = subset(taxi, select=-c(payment_type))
+
+# reorder
+taxi = taxi[order(taxi$tpep_pickup_datetime),]
+
+# Add ID for observations
+id = c(1:nrow(taxi))
+taxi = cbind(id,taxi)
+```
+
+## Recode time and variables sensbily
+
+Rename the time for convenience. Create new variables **dow** for day of week, **hour_trip_start** for the hour when trip started, **trip_duration** for the time duration of each trip.
+
+```{r}
+# 3 recode time and variables sensbily
+names(taxi)[2] = "pickup_datetime"
+names(taxi)[3] = "dropoff_datetime"
+
+taxi <- taxi %>%
+  mutate(
+    dow = wday(pickup_datetime,label=TRUE,abbr=TRUE, week_start = 1),
+    hour_trip_start = as.numeric(hour(pickup_datetime)),
+    trip_duration = as.numeric(difftime(dropoff_datetime,pickup_datetime,units="mins")))
+```
+
+For **dow**, further divided into working days and weekends. For **hour_trip_start**, further divided into different period.
+```{r}
+taxi <- taxi %>%
+  mutate(
+    day_type = as.factor(case_when(dow == "Mon" ~ "Working",
+                               dow == "Tue" ~ "Working",
+                               dow == "Wed" ~ "Working",
+                               dow == "Thu" ~ "Working",
+                               dow == "Fri" ~ "Working",
+                               dow == "Sat" ~ "Weekend",
+                               dow == "Sun" ~ "Weekend")),
+    period = as.factor(case_when(
+      hour_trip_start >= 0 & hour_trip_start < 6 ~ "Early Morning",
+      hour_trip_start >=6 & hour_trip_start < 12 ~ "Morning",
+      hour_trip_start >=12 & hour_trip_start < 18 ~ "Afternoon",
+      hour_trip_start >=18 & hour_trip_start < 24 ~ "Evning")))
+
+# reorder
+taxi = taxi[order(taxi$pickup_datetime),]
+
+
+```
+
+##  Recode location to  pick up a airport trips
+
+NY has 3 different airports, get their latitude and longtitude from https://www.latlong.net, recode the location if the starting place or goal place is airport. Then remove variables that already recoded.
+```{r}
+# Pickup airports or not
+# from https://www.latlong.net
+LGA_lati_range = c(40.78015,40.76507)
+LGA_long_range = c(-73.88544,-73.85623)
+
+JFK_lati_range = c(40.65876,40.622292)
+JFK_long_range = c(-73.822586,-73.750427)
+
+EWR_lati_range = c(40.70953,40.665015)
+EWR_long_range = c(-74.18936,-74.16530)
+
+taxi <- taxi %>%
+  mutate(
+    airport_trips = case_when(
+      pickup_latitude >= LGA_lati_range[2] & 
+        pickup_latitude <= LGA_lati_range[1] & 
+        pickup_longitude >= LGA_long_range[1] &
+        pickup_longitude <= LGA_long_range[2] ~ "From Airport",
+      pickup_latitude >= JFK_lati_range[2] & 
+        pickup_latitude <= JFK_lati_range[1] &
+        pickup_longitude >= JFK_long_range[1] &
+        pickup_longitude <= JFK_long_range[2] ~ "From Airport",
+      pickup_latitude >= EWR_lati_range[2] &
+        pickup_latitude <= EWR_lati_range[1] &
+        pickup_longitude >= EWR_long_range[1] &
+        pickup_longitude <= EWR_long_range[2] ~ "From Airport",
+      dropoff_latitude >= LGA_lati_range[2] &
+        dropoff_latitude <= LGA_lati_range[1] &
+        dropoff_longitude >= LGA_long_range[1] &
+        dropoff_longitude <= LGA_long_range[2] ~ "To Airport",
+      dropoff_latitude >= JFK_lati_range[2] &
+        dropoff_latitude <= JFK_lati_range[1] &
+        dropoff_longitude >= JFK_long_range[1] &
+        dropoff_longitude <= JFK_long_range[2] ~ "To Airport",
+      dropoff_latitude >= EWR_lati_range[2] &
+        dropoff_latitude <= EWR_lati_range[1] &
+        dropoff_longitude >= EWR_long_range[1] &
+        dropoff_longitude <= EWR_long_range[2] ~ "To Airport")
+    )
+
+taxi[is.na(taxi$airport_trips),"airport_trips"] = "False"
+taxi$airport_trips = factor(taxi$airport_trips)
+taxi$dow = factor(taxi$dow)
+taxi$hour_trip_start = factor(taxi$hour_trip_start)
+
+taxi = subset(taxi, select=-c(pickup_datetime, dropoff_datetime, pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude))
+taxi = subset(taxi, select=-c(id))
+```
+
+## Plots to find potential relationships between variables.
+### Trip_distance % Fare_amount & Trip_duration
+```{r, fig.width=6, fig.height=3}
+# Using a small random sample to plot in order to be faster
+plot.df = taxi[sample(x=1:nrow(taxi),size=nrow(taxi)/100,replace=T),]
+
+plot.df %>% filter(trip_distance<40 & tip_amount<60) %>%
+  ggplot(aes(x=trip_distance, y=tip_amount)) + geom_hex()  + geom_smooth() + 
+  ggtitle("tip_amount VS trip_distance")
+
+plot.df %>% filter(fare_amount<100 & tip_amount<60) %>%
+  ggplot(aes(x=fare_amount, y=tip_amount)) + geom_hex()  + geom_smooth() + 
+  ggtitle("tip_amount VS fare_amount")
+
+plot.df %>% filter(trip_duration<100 & tip_amount<60) %>%
+  ggplot(aes(x=trip_duration, y=tip_amount)) + geom_hex() + geom_smooth() + 
+  ggtitle("tip_amount VS trip_duration")
+```
+
+It can be found that these three variables have obvious correlation with **tip_amount**. However, these three variables might have multicolinearation which would affect model result, this problem would be handled later.
+
+### Tollsamount
+```{r, fig.width=6, fig.height=3}
+plot.df %>% 
+  ggplot(aes(x=tolls_amount, y=tip_amount)) + geom_hex() + 
+  ggtitle("tip_amount VS tolls_amount")
+```
+
+No major association, this might caused by the small sample.
+
+### Passenger_count 
+```{r, fig.width=6, fig.height=3}
+plot.df %>%
+  ggplot(aes(x=passenger_count, y=tip_amount)) + geom_hex() + 
+  ggtitle("tip_amount VS passenger_count")
+```
+
+It seems no appearently realationship between number of passenger and tip. And most trips are single trips, in the future, I will explore whether this variable is useful from a mathematical perspective.
+
+### RatecodeID & extra
+```{r, fig.width=6, fig.height=2}
+tempplot.df = plot.df %>% filter(tip_amount<10) 
+qplot(RatecodeID, tip_amount,data = tempplot.df, geom= "boxplot", fill = RatecodeID) + 
+  ggtitle("tip_amount VS RatecodeID")
+qplot(extra, tip_amount,data = tempplot.df, geom= "boxplot", fill = extra)+ 
+  ggtitle("tip_amount VS extra")
+```
+
+Because of the length of sample, not all **RatecodeIDs** are included, but some correlations can still be found.
+
+For **extra**, it seems have slightly correlations.
+
+### dow & day_type
+```{r, fig.width=6, fig.height=2}
+qplot(day_type, tip_amount,data = tempplot.df, geom= "boxplot", fill = dow) + 
+  ggtitle("tip_amount VS day_type")
+```
+
+Judging only from **dow**, there seems to be no connection. If looking at the **daytype** derived from **dow**, the **tip_amount** on working day is higher than on weekends
+
+### hour_trip_start & period
+```{r, fig.width=6, fig.height=2}
+qplot(period, tip_amount,data = tempplot.df, geom= "boxplot", fill = hour_trip_start)+ 
+  ggtitle("tip_amount VS period")
+```
+
+The tip when Evening will be higher.
+
+### airport_trips
+```{r, fig.width=6, fig.height=2}
+qplot(airport_trips, tip_amount,data = tempplot.df, geom= "boxplot", fill = airport_trips)+ 
+  ggtitle("tip_amount VS airport_trips")
+```
+
+For passengers going to and from the airport, obviously they give more tips.
+
+## Filter rows into 95% Interval
+```{r}
+trip_distance_range95 = quantile(taxi$trip_distance, c(0.025, 0.975))
+fare_amount_range95 = quantile(taxi$fare_amount, c(0.025, 0.975))
+tip_amount_range95 = quantile(taxi$tip_amount, c(0.025, 0.975))
+tolls_amount_range95 = quantile(taxi$tolls_amount, c(0.025, 0.975))
+trip_duration_range95 = quantile(taxi$trip_duration, c(0.025, 0.975))
+
+taxi = taxi %>% filter(
+  trip_distance >= trip_distance_range95[1],
+  trip_distance <= trip_distance_range95[2],
+  fare_amount >= fare_amount_range95[1],
+  fare_amount <= fare_amount_range95[2],
+  tip_amount >= tip_amount_range95[1],
+  tip_amount <= tip_amount_range95[2],
+  tolls_amount >= tolls_amount_range95[1],
+  tolls_amount <= tolls_amount_range95[2],
+  trip_duration >= trip_duration_range95[1],
+  trip_duration <= trip_duration_range95[2]
+)
+```
+
+Judging from the drawing and summary results, this huge data set has some extreme data. Although the overall proportion is not large, because we are exploring numerical response variables, too large values interfere with the model very seriously. So I filter the data to be within 95% of the total data set.
+
+# Model fit: have a cost-complexity model selection stratgy
+
+```{r}
+full.fit = lm(tip_amount~.-dow-hour_trip_start, data = taxi)
+vif(full.fit)
+```
+
+**dow & day_type/hour_trip_start & period ** According to the plot, **dow**, **hout_trip_start** are unuseful and **day_type**, **period** could fully replace them respectively. 
+
+Using all of these variables to get a full model. And do VIF check.
+
+The result of VIF show that trip_distance and fare_amount have seriously multicolinearity problem, I would remove one of them.
+
+
+```{r}
+# regsubsets to find best model ()
+regsub.fit <-regsubsets(tip_amount~.-dow-trip_distance-hour_trip_start,data = taxi,nbest=5,nvmax = 12)
+```
+
+## Relevant plots/tables to illustrate model selection
+```{r}
+reg.summary=summary(regsub.fit)
+par(mfrow=c(2,2))
+plot(reg.summary$rss,xlab = 'Model ID',ylab = 'RSS',type='l')
+points(which.min(reg.summary$rss),reg.summary$rss[which.min(reg.summary$rss)],col='red',cex=2,pch=20)
+
+plot(reg.summary$adjr2,xlab = 'Model ID',ylab = 'Adjusted RSq',type='l')
+points(which.max(reg.summary$adjr2),reg.summary$adjr2[which.max(reg.summary$adjr2)],col='red',cex=2,pch=20)
+
+plot(reg.summary$cp,xlab='Model ID',ylab='Cp',type='l')
+points(which.min(reg.summary$cp),reg.summary$cp[which.min(reg.summary$cp)],col='red',cex=2,pch=20)
+
+plot(reg.summary$bic,xlab='Model ID',ylab='Bic',type='l')
+points(which.min(reg.summary$bic),reg.summary$bic[which.min(reg.summary$bic)],col='red',cex=2,pch=20)
+
+```
+
+```{r}
+which.max(reg.summary$adjr2)
+plot(regsub.fit, scale = "adjr2")
+
+which.min(reg.summary$bic)
+plot(regsub.fit, scale = "bic")
+```
+
+Select the best model from all 60 submodels by RSS/Adjusted R2/Cp/BIC. The variables of this model are showed:
+```{r}
+summary(regsub.fit)$which[which.max(reg.summary$adjr2),]
+```
+
+## Calculate MSPE to select model from regsub.fit
+```{r}
+set.seed(1)
+
+# Randomly divide the serial numbers of training set and data set
+train=sample(c(TRUE,FALSE),nrow(taxi),rep=TRUE)
+test=(!train)
+
+test.mat=model.matrix(tip_amount~.,data=taxi[test,])
+val.errors=rep(NA,60)
+
+# Calculate the training set / test set MSPE of all models
+for(i in 1:60){
+ coefi=coef(regsub.fit,i) # Coefficients of i-variable model
+ pred=test.mat[,names(coefi)] %*% coefi
+ val.errors[i]=mean((taxi$tip_amount[test]-pred)^2)
+}
+```
+
+Divide the taxi_wk2 data into trainset and testset, try different model and calculate the error, the result and the variables of the best model are:
+
+```{r}
+# val.errors
+summary(regsub.fit)$which[which.min(val.errors),]
+```
+The smallest MSPE for the test data is 0.8234038, which is fitted by model-56.
+
+Actually, this model's variables is almost the same as before. So, The final model are selected as **tip_amount ~  RatecodeID+fare_amount+extra+tolls_amount+trip_duration+day_type+airport_trips**
+
+```{r}
+final.fit = lm(tip_amount~ RatecodeID+fare_amount+extra+tolls_amount +trip_duration+day_type+airport_trips, data = taxi)
+```
+
+## Clean wk4data as wk2data done
+```{r}
+taxi_week4_raw <- read_csv("./AS2_datasets/week4.csv")
+taxi_week4 = subset(taxi_week4_raw, select=-c(VendorID, store_and_fwd_flag, mta_tax, improvement_surcharge,total_amount))
+
+taxi_week4 = taxi_week4 %>% filter(passenger_count != 0 &
+                                           trip_distance != 0 &
+                                           pickup_longitude != 0 &
+                                           pickup_latitude != 0 &
+                                           RatecodeID < 6 &
+                                           dropoff_longitude != 0 &
+                                           dropoff_latitude !=0 &
+                                           payment_type == 1 &
+                                           fare_amount > 0 &
+                                           (extra == 0 |
+                                           extra == 0.5 |
+                                           extra == 1) &
+                                           tip_amount >= 0 &
+                                           tolls_amount >= 0)
+
+taxi_week4$extra = factor(taxi_week4$extra)
+taxi_week4$RatecodeID = factor(taxi_week4$RatecodeID)
+
+taxi_week4 = subset(taxi_week4, select=-c(payment_type))
+# reorder
+taxi_week4 = taxi_week4[order(taxi_week4$tpep_pickup_datetime),]
+# id
+id = c(1:nrow(taxi_week4))
+taxi_week4 = cbind(id,taxi_week4)
+
+names(taxi_week4)[2] = "pickup_datetime"
+names(taxi_week4)[3] = "dropoff_datetime"
+
+taxi_week4 <- taxi_week4 %>%
+  mutate(
+    dow = wday(pickup_datetime,label=TRUE,abbr=TRUE, week_start = 1),
+    hour_trip_start = as.numeric(hour(pickup_datetime)),
+    trip_duration = as.numeric(difftime(dropoff_datetime,pickup_datetime,units="mins")))
+
+taxi_week4 <- taxi_week4 %>%
+  mutate(
+    day_type = as.factor(case_when(dow == "Mon" ~ "Working",
+                               dow == "Tue" ~ "Working",
+                               dow == "Wed" ~ "Working",
+                               dow == "Thu" ~ "Working",
+                               dow == "Fri" ~ "Working",
+                               dow == "Sat" ~ "Weekend",
+                               dow == "Sun" ~ "Weekend")),
+    period = as.factor(case_when(
+      hour_trip_start >= 0 & hour_trip_start < 6 ~ "Early Morning",
+      hour_trip_start >=6 & hour_trip_start < 12 ~ "Morning",
+      hour_trip_start >=12 & hour_trip_start < 18 ~ "Afternoon",
+      hour_trip_start >=18 & hour_trip_start < 24 ~ "Evning")))
+
+# reorder
+taxi_week4 = taxi_week4[order(taxi_week4$pickup_datetime),]
+
+# Pickup airports or not
+# from https://www.latlong.net
+LGA_lati_range = c(40.78015,40.76507)
+LGA_long_range = c(-73.88544,-73.85623)
+
+JFK_lati_range = c(40.65876,40.622292)
+JFK_long_range = c(-73.822586,-73.750427)
+
+EWR_lati_range = c(40.70953,40.665015)
+EWR_long_range = c(-74.18936,-74.16530)
+taxi_week4 <- taxi_week4 %>%
+  mutate(
+    airport_trips = case_when(
+      pickup_latitude >= LGA_lati_range[2] & 
+        pickup_latitude <= LGA_lati_range[1] & 
+        pickup_longitude >= LGA_long_range[1] &
+        pickup_longitude <= LGA_long_range[2] ~ "From Airport",
+      pickup_latitude >= JFK_lati_range[2] & 
+        pickup_latitude <= JFK_lati_range[1] &
+        pickup_longitude >= JFK_long_range[1] &
+        pickup_longitude <= JFK_long_range[2] ~ "From Airport",
+      pickup_latitude >= EWR_lati_range[2] &
+        pickup_latitude <= EWR_lati_range[1] &
+        pickup_longitude >= EWR_long_range[1] &
+        pickup_longitude <= EWR_long_range[2] ~ "From Airport",
+      dropoff_latitude >= LGA_lati_range[2] &
+        dropoff_latitude <= LGA_lati_range[1] &
+        dropoff_longitude >= LGA_long_range[1] &
+        dropoff_longitude <= LGA_long_range[2] ~ "To Airport",
+      dropoff_latitude >= JFK_lati_range[2] &
+        dropoff_latitude <= JFK_lati_range[1] &
+        dropoff_longitude >= JFK_long_range[1] &
+        dropoff_longitude <= JFK_long_range[2] ~ "To Airport",
+      dropoff_latitude >= EWR_lati_range[2] &
+        dropoff_latitude <= EWR_lati_range[1] &
+        dropoff_longitude >= EWR_long_range[1] &
+        dropoff_longitude <= EWR_long_range[2] ~ "To Airport")
+    )
+
+taxi_week4[is.na(taxi_week4$airport_trips),"airport_trips"] = "False"
+taxi_week4$airport_trips = factor(taxi_week4$airport_trips)
+taxi_week4$dow = factor(taxi_week4$dow)
+taxi_week4$hour_trip_start = factor(taxi_week4$hour_trip_start)
+
+taxi_week4 = subset(taxi_week4, select=-c(pickup_datetime, dropoff_datetime, pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude))
+taxi_week4 = subset(taxi_week4, select=-c(id))
+
+# 95% 
+trip_distance_range95_wk4 = quantile(taxi_week4$trip_distance, c(0.025, 0.975))
+fare_amount_range95_wk4 = quantile(taxi_week4$fare_amount, c(0.025, 0.975))
+tip_amount_range95_wk4 = quantile(taxi_week4$tip_amount, c(0.025, 0.975))
+tolls_amount_range95_wk4 = quantile(taxi_week4$tolls_amount, c(0.025, 0.975))
+trip_duration_range95_wk4 = quantile(taxi_week4$trip_duration, c(0.025, 0.975))
+
+taxi_week4 = taxi_week4 %>% filter(
+  trip_distance >= trip_distance_range95_wk4[1] &
+  trip_distance <= trip_distance_range95_wk4[2] &
+  fare_amount >= fare_amount_range95_wk4[1] &
+  fare_amount <= fare_amount_range95_wk4[2] &
+  tip_amount >= tip_amount_range95_wk4[1] &
+  tip_amount <= tip_amount_range95_wk4[2] &
+  tolls_amount >= tolls_amount_range95_wk4[1] &
+  tolls_amount <= tolls_amount_range95_wk4[2] &
+  trip_duration >= trip_duration_range95_wk4[1] &
+  trip_duration <= trip_duration_range95_wk4[2]
+)
+```
+
+## Justify decision to clean wk4 data
+```{r}
+y_predict = predict(final.fit, taxi_week4)
+```
+
+## Calculate MSPE for wk4
+```{r}
+MSPE_for_wk4 <- mean((y_predict - taxi_week4$tip_amount)^2)
+MSPE_for_wk4
+```
+
+## Do Lasso Regression
+```{r}
+# lasso
+lasso_taxi = taxi[,-6]
+lasso_taxi$tip_amount = taxi$tip_amount
+
+X <- model.matrix( ~ ., lasso_taxi[,c(1:12)])
+y = lasso_taxi$tip_amount
+
+lasso.fit <-glmnet(X,y) 
+plot(lasso.fit)
+xval <-cv.glmnet(X,y)  # alpha=1, L1 Norm
+plot(xval)
+coef(lasso.fit, s=xval$lambda.min)
+
+lasso_taxi_week4 = taxi_week4[,-6]
+lasso_taxi_week4$tip_amount = taxi_week4$tip_amount
+
+X_test <- model.matrix( ~ ., lasso_taxi_week4[,c(1:12)]) 
+y_test = lasso_taxi_week4$tip_amount
+
+predy<-predict(lasso.fit, X_test, s=xval$lambda.min)
+MSPE_for_wk4_lasso = mean((predy[,1] - taxi_week4$tip_amount)^2)
+MSPE_for_wk4_lasso
+```
+Try lasso regression. The result of MSPE is almost the same
+
+## Interpret model and accuracy
+```{r}
+summary(final.fit)
+MSPE_for_wk4
+```
+According to the summary, these model's R Squared is about 63.2%, which means this model could explain 63.2% of taxi data in week2, not so high but high enough. All variables have small p-value(<0.001), this shows that all variables selected have strong relationship with tip_amount.The model selection result and plots could support each other. Only 6 variables are used in the final model, this model is not a big model which is easy to use for analyze the tip pattern. The residual standard error is 0.903 that is small. The MSPE for week4 data(1.089) is slightly larger than MSPE for testdata from week2(0.823), but it still in acceptable range.
+
+The model also basically conforms to the conjecture in the plots, for fare_amount, each unit increaed would lead 0.15\$ more tip; the passenger pay extra money(0.5\$/1\$) would pay 0.103/0.15\$ more tip; passenger pay every 1unit tolls would pay more 0.198\$ tip. For trip_duration, only very small increase(0.009) for every 1 minute duration increased. A passenger would pay more 0.455\$ tip if this trip is starting from airports and 0.578\$ tip if this trip is going to airport.
+
+Overall, this report sorted and filtered the taxi data in New York for a week, and extracted some relevant information. Combined with the plots and mathematical standards, the best model for **tip** prediction was selected and applied to the fourth week of taxi data. The size and accuracy of the model are satisfactory.
+
+What can be improved is the further mining of time, latitude and longitude data. In addition to dividing the time data into morning and evening, maybe you can also try to combine the peak hours of New York to process. The latitude and longitude can be used to divide the starting points of different regions. In this report, it is only used to determine whether the itinerary is related to the airport.
+
+
+
